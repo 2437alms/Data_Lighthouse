@@ -22,7 +22,7 @@ const previewHtml = `<!doctype html>
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>DataLighthouse 数据灯塔 AI - 单文件预览</title>
+    <title>Data Lighthouse 数据灯塔 AI - 单文件预览</title>
     <style>
 ${css}
     </style>

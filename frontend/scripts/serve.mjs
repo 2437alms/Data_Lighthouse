@@ -45,6 +45,6 @@ const server = createServer(async (request, response) => {
 });
 
 server.listen(port, host, () => {
-  console.log(`DataLighthouse 前端已启动：http://${host}:${port}/`);
+  console.log(`Data Lighthouse 前端已启动：http://${host}:${port}/`);
   console.log(`健康检查：http://${host}:${port}/health`);
 });

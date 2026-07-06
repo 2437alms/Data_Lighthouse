@@ -1,4 +1,11 @@
-import { conversations, libraryItems, opportunities, radarSummary } from "./data.js";
+import {
+  conversations,
+  knowledgeCategories,
+  knowledgeDocuments,
+  libraryItems,
+  opportunities,
+  radarSummary
+} from "./data.js";
 
 const API_BASE_URL = window.__API_BASE_URL__ || localStorage.getItem("API_BASE_URL") || "";
 
@@ -8,6 +15,9 @@ const ENDPOINTS = {
   watchTargets: "/api/watch-targets",
   favorites: "/api/favorites",
   library: "/api/library",
+  knowledgeCategories: "/api/knowledge/categories",
+  knowledgeDocuments: "/api/knowledge/documents",
+  knowledgeUpload: "/api/knowledge/documents/upload",
   conversations: "/api/conversations",
   chat: "/api/chat/messages"
 };
@@ -18,12 +28,14 @@ async function request(path, options = {}, fallback) {
   }
 
   try {
+    const isFormData = typeof FormData !== "undefined" && options.body instanceof FormData;
+    const headers = {
+      ...(isFormData ? {} : { "Content-Type": "application/json" }),
+      ...(options.headers || {})
+    };
     const response = await fetch(`${API_BASE_URL}${path}`, {
-      headers: {
-        "Content-Type": "application/json",
-        ...options.headers
-      },
-      ...options
+      ...options,
+      headers
     });
 
     if (!response.ok) {
@@ -52,11 +64,79 @@ function saveOpportunityState(id, patch) {
   localStorage.setItem("DL_OPPORTUNITY_STATE", JSON.stringify(state));
 }
 
+function getKnowledgeState() {
+  return JSON.parse(localStorage.getItem("DL_KNOWLEDGE_STATE") || "{\"documents\":[],\"deletedIds\":[]}");
+}
+
+function saveKnowledgeState(state) {
+  localStorage.setItem("DL_KNOWLEDGE_STATE", JSON.stringify(state));
+}
+
+function currentKnowledgeDocuments() {
+  const state = getKnowledgeState();
+  const deleted = new Set(state.deletedIds || []);
+  return [...knowledgeDocuments, ...(state.documents || [])].filter((item) => !deleted.has(item.id));
+}
+
+function withCategoryCounts(categories, documents) {
+  return categories.map((category) => ({
+    ...category,
+    document_count: documents.filter((item) => item.category_key === category.key).length
+  }));
+}
+
+function filterKnowledgeDocuments(filters = {}) {
+  const q = String(filters.q || "").trim().toLowerCase();
+  return currentKnowledgeDocuments()
+    .filter((item) => !filters.category || item.category_key === filters.category)
+    .filter((item) => !filters.type || filters.type === "all" || item.type === filters.type)
+    .filter((item) => !filters.status || filters.status === "all" || item.status === filters.status)
+    .filter((item) => {
+      if (!q) return true;
+      return [item.title, item.summary, item.source_filename, item.type, ...(item.tags || [])]
+        .filter(Boolean)
+        .some((value) => String(value).toLowerCase().includes(q));
+    })
+    .sort((a, b) => String(b.updated_at).localeCompare(String(a.updated_at)));
+}
+
+function buildLocalKnowledgeDocument(payload) {
+  const now = new Date().toISOString();
+  return {
+    id: `local-${Date.now()}`,
+    category_key: payload.category_key,
+    title: payload.title,
+    type: payload.type || "资料",
+    tags: Array.isArray(payload.tags)
+      ? payload.tags
+      : String(payload.tags || "")
+          .split(/[,，]/)
+          .map((item) => item.trim())
+          .filter(Boolean),
+    summary: payload.summary || "",
+    source_filename: payload.source_filename || null,
+    stored_path: null,
+    file_size: payload.file_size || 0,
+    status: payload.status || "ready",
+    created_at: now,
+    updated_at: now,
+    download_url: null
+  };
+}
+
+function addLocalKnowledgeDocument(payload) {
+  const document = buildLocalKnowledgeDocument(payload);
+  const state = getKnowledgeState();
+  state.documents = [...(state.documents || []), document];
+  saveKnowledgeState(state);
+  return document;
+}
+
 export async function getRadarSummary() {
   const list = currentOpportunities();
   const fallback = {
     ...radarSummary,
-    recommendedCount: list.length,
+    recommendedCount: Math.min(list.length, 4),
     watchingCount: list.filter((item) => item.watching).length,
     highestMatch: Math.max(...list.map((item) => item.match))
   };
@@ -84,6 +164,72 @@ export async function getFavorites() {
 
 export async function getLibraryItems() {
   return request(ENDPOINTS.library, {}, libraryItems);
+}
+
+export async function getKnowledgeCategories() {
+  const fallback = withCategoryCounts(knowledgeCategories, currentKnowledgeDocuments());
+  return request(ENDPOINTS.knowledgeCategories, {}, fallback);
+}
+
+export async function getKnowledgeDocuments(filters = {}) {
+  const params = new URLSearchParams();
+  if (filters.category) params.set("category", filters.category);
+  if (filters.q) params.set("q", filters.q);
+  if (filters.type && filters.type !== "all") params.set("type", filters.type);
+  if (filters.status && filters.status !== "all") params.set("status", filters.status);
+  const path = `${ENDPOINTS.knowledgeDocuments}${params.toString() ? `?${params}` : ""}`;
+  return request(path, {}, filterKnowledgeDocuments(filters));
+}
+
+export async function getKnowledgeDocument(id) {
+  const fallback = currentKnowledgeDocuments().find((item) => item.id === id) || null;
+  return request(`${ENDPOINTS.knowledgeDocuments}/${id}`, {}, fallback);
+}
+
+export async function createKnowledgeDocument(payload) {
+  if (!API_BASE_URL) return clone(addLocalKnowledgeDocument(payload));
+  return request(
+    ENDPOINTS.knowledgeDocuments,
+    {
+      method: "POST",
+      body: JSON.stringify(payload)
+    },
+    buildLocalKnowledgeDocument(payload)
+  );
+}
+
+export async function uploadKnowledgeDocument(formData) {
+  const file = formData.get("file");
+  const payload = {
+    category_key: formData.get("category_key"),
+    title: formData.get("title") || file?.name || "未命名资料",
+    type: formData.get("type") || "上传文件",
+    tags: formData.get("tags") || "",
+    summary: formData.get("summary") || "",
+    source_filename: file?.name || null,
+    file_size: file?.size || 0,
+    status: formData.get("status") || "ready"
+  };
+  if (!API_BASE_URL) return clone(addLocalKnowledgeDocument(payload));
+  return request(
+    ENDPOINTS.knowledgeUpload,
+    {
+      method: "POST",
+      body: formData
+    },
+    buildLocalKnowledgeDocument(payload)
+  );
+}
+
+export async function deleteKnowledgeDocument(id) {
+  if (!API_BASE_URL) {
+    const state = getKnowledgeState();
+    state.deletedIds = [...new Set([...(state.deletedIds || []), id])];
+    state.documents = (state.documents || []).filter((item) => item.id !== id);
+    saveKnowledgeState(state);
+    return { ok: true };
+  }
+  return request(`${ENDPOINTS.knowledgeDocuments}/${id}`, { method: "DELETE" }, { ok: true });
 }
 
 export async function getConversations() {
@@ -125,6 +271,11 @@ export async function toggleFavorite(id) {
   saveOpportunityState(id, { favorite: next });
   await request(`${ENDPOINTS.favorites}/${id}`, { method: next ? "POST" : "DELETE" }, { ok: true });
   return next;
+}
+
+export async function updateOpportunityState(id, patch) {
+  saveOpportunityState(id, patch);
+  return request(`${ENDPOINTS.opportunities}/${id}`, { method: "PATCH", body: JSON.stringify(patch) }, { ok: true });
 }
 
 export async function toggleWatching(id) {
